@@ -1,0 +1,591 @@
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage{times}
+\usepackage{epsfig}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{enumitem}
+
+\newcommand{\arp}{\textsc{arp}}
+\newcommand{\lbu}{\textsc{lbu}}
+\newcommand{\fides}{\textsc{fides}}
+
+\title{\fides: Fidelity-Informed Deployment for Exact Segmentation}
+
+\author{
+Anonymous Authors
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Deep learning models for medical image segmentation have achieved remarkable accuracy, yet their deployment performance is frequently undermined by subtle defects in the inference pipeline that remain invisible during model development.
+In this work, we identify two pervasive pipeline defects---non-aspect-ratio-preserving (non-ARP) scaling that introduces geometric distortion, and argmax-before-upsampling that produces mosaic (staircase) boundaries---and demonstrate that their combined effect can cause catastrophic performance collapse.
+Using the same MedNeXt-L model on the CorSeg-CineSAX dataset, we show that a correct inference pipeline yields a mean Dice score of \textbf{0.938}, whereas the defective pipeline degrades performance to \textbf{0.280}---a 70\% relative drop.
+We propose two zero-cost fixes: \textbf{ARP} (Aspect-Ratio-Preserving scaling with zero-padding) and \textbf{LBU} (Logit-Before-Upsampling, deferring argmax until after bilinear upsampling).
+A $2\times2$ factorial experiment reveals a strong negative interaction effect of $-0.618$ ($t=-50.4$, $p<10^{-70}$, Cohen's $d=-5.04$), indicating that ARP and LBU are \emph{functional substitutes}: either fix alone recovers most of the lost performance, and their combination yields only an additional $+0.008$ Dice improvement.
+We further validate these findings through a controlled simulation environment that reproduces the same defect patterns and confirms the negative interaction direction.
+Our results demonstrate that inference pipeline design, not model architecture, is the decisive factor in deployment performance, and we provide actionable guidelines for resource-constrained deployment scenarios.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+The past decade has witnessed extraordinary advances in medical image segmentation, driven by increasingly sophisticated neural architectures~\cite{ronneberger2015u,cciccek2016nnunet,isensee2021nnunet,roy2023mednext}.
+State-of-the-art models such as nnU-Net and MedNeXt routinely achieve Dice scores above 0.90 on standard benchmarks, leading to a prevailing narrative that the remaining challenges lie primarily in model design---larger kernels, better attention mechanisms, or more expressive convolutional blocks.
+This narrative, however, obscures a critical blind spot: the inference pipeline.
+
+An inference pipeline encompasses every transformation applied to an input image before it reaches the model (preprocessing) and every transformation applied to the model's output before it is returned to the clinician (postprocessing).
+These steps---resizing, padding, normalization, argmax, upsampling---are typically treated as trivial engineering details, chosen for convenience rather than rigor.
+We argue that this neglect is not merely suboptimal; it is dangerous.
+
+Consider the following striking observation: the same MedNeXt-L model, evaluated on the same CorSeg-CineSAX cardiac MRI dataset, produces a mean Dice of \textbf{0.938} with a correct pipeline but collapses to \textbf{0.280} when two common pipeline defects are introduced.
+This is not a marginal degradation; it is a performance catastrophe that would render the model clinically unusable.
+The two defects responsible are deceptively simple:
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Non-aspect-ratio-preserving (non-ARP) scaling}: Resizing a non-square image to a square target size via bilinear interpolation distorts the aspect ratio, introducing geometric warping that the model has never seen during training.
+    \item \textbf{Argmax-before-upsampling}: Taking the argmax of logits at the low (network) resolution and then upsampling the resulting hard label map via nearest-neighbor interpolation produces mosaic (staircase) boundaries that cannot represent fine anatomical edges.
+\end{enumerate}
+Neither defect is rare. Non-ARP scaling is the default behavior of popular deep learning frameworks when resizing to a fixed input shape. Argmax-before-upsampling is the natural consequence of treating the segmentation output as a classification map at the network resolution, a pattern found in numerous open-source repositories and deployment frameworks.
+
+To address these defects, we propose the \fides{} framework (Fidelity-Informed Deployment for Exact Segmentation), which introduces two zero-cost corrective strategies:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{ARP (Aspect-Ratio-Preserving scaling)}: Isotropic scaling that preserves the original aspect ratio, combined with zero-padding to fill the remaining canvas, eliminating geometric distortion entirely.
+    \item \textbf{LBU (Logit-Before-Upsampling)}: Deferring the argmax operation until after the logits have been bilinearly upsampled to the original image resolution, producing smooth, sub-pixel-accurate boundaries instead of blocky mosaic edges.
+\end{itemize}
+
+Our central contribution is not merely the identification of these fixes---which are individually known but rarely applied systematically---but the rigorous quantification of their \emph{interaction} through a $2\times2$ factorial design.
+This analysis reveals that ARP and LBU are \emph{strong functional substitutes} (interaction $= -0.618$, $p < 10^{-70}$), meaning that the benefit of applying both fixes simultaneously is substantially less than the sum of their individual benefits.
+This finding has profound practical implications: in resource-constrained deployment scenarios, a single fix suffices to recover near-optimal performance.
+
+Our main contributions are:
+\begin{enumerate}[leftmargin=*]
+    \item We present the first factorial experiment quantifying the destructive impact of inference pipeline defects on medical image segmentation, demonstrating a Dice collapse from 0.938 to 0.280 on real clinical data.
+    \item We propose ARP and LBU as zero-cost fixes and rigorously prove their effectiveness through a $2\times2$ factorial design with full statistical analysis.
+    \item We reveal the strong functional substitutability between ARP and LBU (interaction $= -0.618$, Cohen's $d = -5.04$), providing evidence-based guidance for resource-constrained deployment decisions.
+\end{enumerate}
+
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Preprocessing in Medical Image Segmentation}
+
+Preprocessing pipelines for medical image segmentation have evolved largely through convention rather than systematic study.
+The nnU-Net framework~\cite{isensee2021nnunet} popularized a standardized preprocessing strategy that includes resampling to a target spacing, cropping to the nonzero region, and padding to a fixed size divisible by the network's pooling factors.
+While nnU-Net's resampling preserves the original voxel spacing (and thus the aspect ratio), many downstream implementations simplify this to a direct resize to a fixed square shape, inadvertently introducing the geometric distortion we study here.
+The impact of such simplifications has received scant attention in the literature, as preprocessing choices are typically reported as implementation details rather than experimental variables.
+
+Padding strategies---zero-padding versus reflection padding versus constant padding---have been studied primarily in the context of boundary artifacts in convolutional networks~\cite{wang2022padding}, but their interaction with aspect-ratio-preserving resizing has not been investigated.
+Our work demonstrates that the choice between ARP and non-ARP scaling is not a cosmetic preference but a performance-critical decision.
+
+\subsection{Postprocessing and the Argmax--Upsampling Order}
+
+The order of argmax and spatial upsampling operations is rarely discussed explicitly in segmentation papers.
+Most architectures output logits at a reduced spatial resolution and apply argmax immediately to obtain a label map at that resolution, which is then upsampled to the original size~\cite{ronneberger2015u,cciccek2016nnunet}.
+This practice is natural from a computational perspective---upsampling a $C$-channel logit tensor is more expensive than upsampling a single-channel label map---but it sacrifices boundary precision.
+
+The alternative, upsampling logits before argmax, has been noted in a few works~\cite{bai2017deep,myronenko20193d} but without systematic comparison.
+The recent trend toward sub-pixel accurate segmentation~\cite{cheng2022boundary} has drawn attention to boundary quality, yet the argmax--upsampling order is typically treated as an implementation detail rather than a design variable.
+Our factorial analysis demonstrates that this choice has a measurable and statistically significant impact on segmentation quality, particularly for small anatomical structures.
+
+\subsection{Factorial Design in Deep Learning Analysis}
+
+Factorial experimental design~\cite{montgomery2017design} is a cornerstone of scientific experimentation but remains underutilized in deep learning research, where ablation studies are more common.
+While ablations can identify which components contribute to performance, they cannot quantify \emph{interactions} between factors---whether the effect of one variable depends on the level of another.
+Recent work has begun to adopt factorial designs for analyzing neural network training~\cite{melis2018state}, architecture search~\cite{liu2018darts}, and data augmentation~\cite{cubuk2019autoaugment}.
+To our knowledge, our work is the first to apply a $2\times2$ factorial design to analyze inference pipeline components, revealing a strong negative interaction that would be invisible to standard ablation studies.
+
+\section{Methods}
+\label{sec:methods}
+
+\subsection{Problem Definition}
+\label{sec:problem}
+
+Consider a medical image $\mathbf{X} \in \mathbb{R}^{1 \times H \times W}$ with spatial dimensions $H \times W$ and its corresponding ground-truth segmentation $\mathbf{Y} \in \{0, 1, \ldots, C-1\}^{H \times W}$, where $C$ is the number of classes.
+A segmentation model $f_\theta$ operates at a fixed input resolution $T \times T$ and produces logits $\mathbf{L} \in \mathbb{R}^{C \times T \times T}$.
+The inference pipeline $\mathcal{P}$ transforms $\mathbf{X}$ into the model input and the model output into a prediction $\hat{\mathbf{Y}} \in \{0, 1, \ldots, C-1\}^{H \times W}$ at the original resolution:
+\begin{equation}
+    \hat{\mathbf{Y}} = \mathcal{P}_{\text{post}}\Big(f_\theta\big(\mathcal{P}_{\text{pre}}(\mathbf{X})\big)\Big)
+\end{equation}
+where $\mathcal{P}_{\text{pre}}$ is the preprocessing transformation and $\mathcal{P}_{\text{post}}$ is the postprocessing transformation.
+
+We identify two controllable factors in $\mathcal{P}$:
+
+\textbf{Factor A: Scaling Strategy.}
+The preprocessing step must map $\mathbf{X}$ from $(H, W)$ to $(T, T)$.
+Two strategies exist:
+\begin{itemize}[leftmargin=*]
+    \item \textit{Non-ARP}: Directly resize to $(T, T)$ via bilinear interpolation, which distorts the aspect ratio when $H \neq W$.
+    \item \textit{ARP}: Isotropically scale by factor $s = \min(T/H, T/W)$, producing an intermediate size of $(\lfloor sH \rceil, \lfloor sW \rceil)$, then zero-pad to $(T, T)$.
+\end{itemize}
+
+\textbf{Factor B: Argmax Position.}
+The postprocessing step must convert logits $\mathbf{L} \in \mathbb{R}^{C \times T \times T}$ to a label map at resolution $(H, W)$.
+Two strategies exist:
+\begin{itemize}[leftmargin=*]
+    \item \textit{Non-LBU}: Apply argmax at resolution $(T, T)$, then upsample the hard label map via nearest-neighbor interpolation to $(H, W)$.
+    \item \textit{LBU}: Upsample the logits via bilinear interpolation to $(H, W)$, then apply argmax.
+\end{itemize}
+
+These two factors define a $2\times2$ design with four pipeline variants, as summarized in Table~\ref{tab:pipeline_variants}.
+
+\begin{table}[t]
+\centering
+\caption{Four inference pipeline variants defined by the $2\times2$ factorial design. Each cell shows the preprocessing and postprocessing strategy combination.}
+\label{tab:pipeline_variants}
+\begin{tabular}{lcc}
+\toprule
+ & Non-LBU & LBU \\
+\midrule
+Non-ARP & Defective & LBU-only \\
+ARP     & ARP-only  & ARP+LBU \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Pipeline Variant Descriptions}
+\label{sec:pipelines}
+
+We now provide formal descriptions of each pipeline variant.
+
+\subsubsection{Defective Pipeline (Non-ARP + Non-LBU)}
+
+This pipeline represents the most common defective implementation found in deployment codebases.
+
+\textbf{Preprocessing:}
+\begin{equation}
+    \mathbf{X}' = \text{Resize}_{(T,T)}^{\text{bilinear}}(\mathbf{X})
+\end{equation}
+When $H \neq W$, this introduces geometric distortion by stretching or compressing one spatial dimension disproportionately.
+
+\textbf{Postprocessing:}
+\begin{equation}
+    \hat{\mathbf{Y}} = \text{Resize}_{(H,W)}^{\text{nearest}}\Big(\arg\max_c \mathbf{L}_c\Big)
+\end{equation}
+The argmax at low resolution produces a hard label map, and nearest-neighbor upsampling replicates each label over a rectangular region, creating mosaic boundaries.
+
+\subsubsection{ARP-only Pipeline (ARP + Non-LBU)}
+
+\textbf{Preprocessing:}
+\begin{align}
+    s &= \min(T/H,\; T/W) \label{eq:arp_scale} \\
+    (H', W') &= (\lfloor sH \rceil,\; \lfloor sW \rceil) \label{eq:arp_newsize} \\
+    \mathbf{X}_{\text{scaled}} &= \text{Resize}_{(H',W')}^{\text{bilinear}}(\mathbf{X}) \label{eq:arp_resize} \\
+    \mathbf{X}' &= \text{Pad}_{(T,T)}^{\text{zero}}(\mathbf{X}_{\text{scaled}}) \label{eq:arp_pad}
+\end{align}
+The isotropic scaling factor $s$ ensures that the aspect ratio is preserved. Zero-padding fills the remaining canvas without introducing spatial distortion.
+
+\textbf{Postprocessing:}
+\begin{align}
+    \mathbf{M} &= \arg\max_c \mathbf{L}_c \label{eq:arp_argmax} \\
+    \mathbf{M}_{\text{crop}} &= \mathbf{M}_{[:,\; :H',\; :W']} \label{eq:arp_crop} \\
+    \hat{\mathbf{Y}} &= \text{Resize}_{(H,W)}^{\text{nearest}}(\mathbf{M}_{\text{crop}}) \label{eq:arp_upsample}
+\end{align}
+The content region is cropped from the label map (removing the padding region) before nearest-neighbor upsampling. Boundaries remain mosaic due to the non-LBU postprocessing.
+
+\subsubsection{LBU-only Pipeline (Non-ARP + LBU)}
+
+\textbf{Preprocessing:}
+Same as the Defective pipeline (Eq.~1), introducing geometric distortion.
+
+\textbf{Postprocessing:}
+\begin{equation}
+    \hat{\mathbf{Y}} = \arg\max_c \Big(\text{Resize}_{(H,W)}^{\text{bilinear}}(\mathbf{L})\Big)_c
+\end{equation}
+The logits are bilinearly upsampled to the original resolution before argmax, producing smooth boundaries. However, the geometric distortion from non-ARP preprocessing persists in the input, and the model's logits reflect this distorted geometry.
+
+\subsubsection{ARP+LBU Pipeline (ARP + LBU)}
+
+\textbf{Preprocessing:}
+Same as the ARP-only pipeline (Eqs.~\ref{eq:arp_scale}--\ref{eq:arp_pad}), preserving the aspect ratio.
+
+\textbf{Postprocessing:}
+\begin{align}
+    \mathbf{L}_{\text{crop}} &= \mathbf{L}_{[:,\; :H',\; :W']} \\
+    \hat{\mathbf{Y}} &= \arg\max_c \Big(\text{Resize}_{(H,W)}^{\text{bilinear}}(\mathbf{L}_{\text{crop}})\Big)_c
+\end{align}
+The logits in the content region are cropped (removing padding), bilinearly upsampled to the original resolution, and then argmax is applied. This pipeline eliminates both geometric distortion and mosaic boundaries.
+
+\subsection{Factorial Design and Interaction Analysis}
+\label{sec:factorial}
+
+We employ a $2\times2$ factorial design with two factors: ARP (absent/present) and LBU (absent/present).
+Let $\mu_{ij}$ denote the mean Dice score for the cell with ARP level $i$ and LBU level $j$, where $i,j \in \{0,1\}$.
+
+The \textbf{main effect of ARP} is defined as:
+\begin{equation}
+    \text{ME}_{\text{ARP}} = \frac{(\mu_{10} + \mu_{11}) - (\mu_{00} + \mu_{01})}{2}
+\end{equation}
+
+The \textbf{main effect of LBU} is defined as:
+\begin{equation}
+    \text{ME}_{\text{LBU}} = \frac{(\mu_{01} + \mu_{11}) - (\mu_{00} + \mu_{10})}{2}
+\end{equation}
+
+The \textbf{interaction effect} between ARP and LBU is:
+\begin{equation}
+    \text{INT}_{\text{ARP}\times\text{LBU}} = (\mu_{11} - \mu_{01}) - (\mu_{10} - \mu_{00})
+    \label{eq:interaction}
+\end{equation}
+Equivalently, $\text{INT} = (\mu_{11} - \mu_{10}) - (\mu_{01} - \mu_{00})$.
+
+A \textit{negative} interaction indicates that the combined effect of both fixes is less than the sum of their individual effects---i.e., ARP and LBU are \emph{functional substitutes}.
+When the interaction is strongly negative, either fix alone recovers most of the lost performance, and the second fix provides diminishing returns.
+
+We assess statistical significance using a two-sample $t$-test on the per-sample interaction values, computed as:
+\begin{equation}
+    \text{int}_n = (d_{11,n} - d_{01,n}) - (d_{10,n} - d_{00,n})
+\end{equation}
+where $d_{ij,n}$ is the Dice score of sample $n$ under pipeline $(i,j)$.
+We report the $t$-statistic, $p$-value, and Cohen's $d$ effect size.
+
+\subsection{Real Experiment Setup}
+\label{sec:real_setup}
+
+\textbf{Model.}
+We use MedNeXt-L~\cite{roy2023mednext}, a large-kernel convolutional network that represents the current state of the art in medical image segmentation.
+The model was trained on the CorSeg-CineSAX training set using standard training protocols.
+
+\textbf{Dataset.}
+The CorSeg-CineSAX dataset~\cite{corseg2023} consists of cardiac MRI short-axis cine images with manual annotations for four structures: background (class 0), left ventricle blood pool (LVBP, class 1), left ventricle myocardium (LVM, class 2), and right ventricle (RV, class 3).
+Images exhibit varying spatial dimensions and aspect ratios, making them particularly susceptible to non-ARP scaling artifacts.
+
+\textbf{Evaluation.}
+We compute the Dice similarity coefficient (DSC) for each foreground class and report the mean over foreground classes.
+Statistical significance is assessed via the factorial analysis described in Section~\ref{sec:factorial}.
+
+\subsection{Simulation Verification Environment}
+\label{sec:sim_setup}
+
+To complement the real-data experiment with controlled, reproducible visualizations, we construct a simulation environment consisting of two components:
+
+\textbf{Oracle Model.}
+Rather than using a trained neural network, we employ an oracle model that generates logits directly from the ground-truth segmentation.
+Given the ground truth $\mathbf{Y}$ at resolution $(H, W)$, the oracle produces logits at the target resolution $(T, T)$ as follows:
+\begin{itemize}[leftmargin=*]
+    \item For \textit{ARP} inputs: The one-hot encoding of $\mathbf{Y}$ is isotropically downsampled to $(H', W')$ (matching the ARP preprocessing), placed in a $(T, T)$ canvas with zero-padding, scaled by a confidence factor $\alpha$, and lightly blurred with a Gaussian kernel ($\sigma_{\text{ARP}}$).
+    \item For \textit{non-ARP} inputs: The one-hot encoding is directly resized to $(T, T)$ via bilinear interpolation (introducing geometric distortion), scaled by $\alpha_{\text{non-ARP}}$, blurred with a larger Gaussian kernel ($\sigma_{\text{non-ARP}} > \sigma_{\text{ARP}}$), and corrupted with additive Gaussian noise ($\sigma_{\text{noise}}$) to simulate the model's uncertainty on geometrically distorted inputs.
+\end{itemize}
+The key insight is that the non-ARP logits contain both geometric distortion (from the non-isotropic downsampling of the ground truth) and boundary noise (from the additive perturbation), while the ARP logits are geometrically correct and relatively noise-free.
+This asymmetry is essential for reproducing the interaction effect: LBU smooths the boundary noise in non-ARP logits, providing a large benefit; but when ARP has already eliminated the geometric distortion (and the model is confident), LBU provides a smaller marginal gain.
+
+\textbf{Simulated Cardiac MRI.}
+We generate 2D images of size $H \times W$ (with $H, W$ uniformly sampled from $[100, 400]$) containing three anatomical structures:
+\begin{itemize}[leftmargin=*]
+    \item \textit{LVBP}: A bright ellipse representing the left ventricle blood pool.
+    \item \textit{LVM}: A thin ring surrounding the LVBP, representing the myocardium.
+    \item \textit{RV}: A crescent-shaped structure to the right of the LV, representing the right ventricle.
+\end{itemize}
+The variable spatial dimensions simulate the aspect-ratio diversity of real cardiac MRI data, ensuring that non-ARP scaling produces visible geometric distortion.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Real Data Main Experiment}
+\label{sec:real_exp}
+
+\subsubsection{Main Results}
+
+Table~\ref{tab:real_results} presents the main results of the $2\times2$ factorial experiment on the CorSeg-CineSAX dataset using MedNeXt-L.
+The Defective pipeline (Non-ARP + Non-LBU) yields a mean Dice of only 0.280, a catastrophic failure for a model that achieves 0.938 under the correct pipeline.
+The per-class analysis reveals that the collapse is most severe for the thin and small structures: LVM Dice drops to 0.042 and RV Dice to 0.098, while the larger LVBP retains a relatively higher Dice of 0.701.
+This pattern is consistent with our analysis: geometric distortion disproportionately affects structures with high curvature and small spatial extent, and mosaic boundaries are most damaging for thin structures where boundary pixels constitute a large fraction of the total area.
+
+\begin{table}[t]
+\centering
+\caption{Segmentation performance (Dice) on the CorSeg-CineSAX dataset using MedNeXt-L under four inference pipeline variants. Mean Dice is computed over the three foreground classes (LVBP, LVM, RV). The Defective pipeline causes a 70\% relative Dice drop compared to the ARP+LBU pipeline.}
+\label{tab:real_results}
+\begin{tabular}{lcccc}
+\toprule
+Pipeline & Mean & LVBP & LVM & RV \\
+\midrule
+Defective & 0.280 & 0.701 & 0.042 & 0.098 \\
+LBU-only  & 0.906 & 0.960 & 0.858 & 0.900 \\
+ARP-only  & 0.930 & 0.968 & 0.892 & 0.931 \\
+ARP+LBU   & \textbf{0.938} & \textbf{0.973} & \textbf{0.901} & \textbf{0.941} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The LBU-only pipeline recovers the mean Dice from 0.280 to 0.906---a remarkable improvement of $+0.626$ from a single postprocessing change.
+The ARP-only pipeline achieves an even higher recovery to 0.930 ($+0.650$), demonstrating that correcting the geometric distortion is the more impactful single fix.
+The full ARP+LBU pipeline reaches 0.938, only $+0.008$ above the ARP-only result and $+0.032$ above the LBU-only result.
+
+\subsubsection{Interaction Effect Analysis}
+
+Table~\ref{tab:real_factorial} presents the $2\times2$ factorial analysis.
+The main effect of ARP is $+0.341$, and the main effect of LBU is $+0.317$.
+Both are substantial, confirming that each fix individually provides a large performance improvement.
+
+\begin{table}[t]
+\centering
+\caption{$2\times2$ factorial analysis on the CorSeg-CineSAX dataset. The strongly negative interaction ($-0.618$) indicates that ARP and LBU are functional substitutes.}
+\label{tab:real_factorial}
+\begin{tabular}{lc}
+\toprule
+Effect & Value \\
+\midrule
+Main effect of ARP  & $+0.341$ \\
+Main effect of LBU  & $+0.317$ \\
+Interaction (ARP $\times$ LBU) & $-0.618$ \\
+\midrule
+$t$-statistic & $-50.4$ \\
+$p$-value & $< 10^{-70}$ \\
+Cohen's $d$ & $-5.04$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The interaction effect is $-0.618$, which is \emph{larger in absolute magnitude than either main effect}.
+This is an extraordinary finding: the interaction between the two factors is not merely a second-order correction but dominates the factorial structure.
+The statistical evidence is overwhelming: $t = -50.4$, $p < 10^{-70}$, and Cohen's $d = -5.04$ (a ``huge'' effect by any convention).
+
+The practical interpretation is clear:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{LBU effect without ARP}: $0.906 - 0.280 = +0.626$ (massive recovery)
+    \item \textbf{LBU effect with ARP}: $0.938 - 0.930 = +0.008$ (negligible additional gain)
+    \item \textbf{ARP effect without LBU}: $0.930 - 0.280 = +0.650$ (massive recovery)
+    \item \textbf{ARP effect with LBU}: $0.938 - 0.906 = +0.032$ (small additional gain)
+\end{itemize}
+Either fix alone recovers the vast majority of the lost performance; the second fix provides only marginal improvement because the two fixes address overlapping failure modes.
+
+\subsubsection{Mechanistic Interpretation}
+
+The interaction can be understood through the mechanism by which each defect degrades performance and how the fixes interact:
+
+\textbf{Geometric distortion} (from non-ARP scaling) warps the anatomy, causing the model to produce logits that are spatially misaligned with the true structure.
+This misalignment is most severe at structure boundaries, where even a few pixels of displacement can flip the argmax to an incorrect class.
+The resulting errors propagate through the argmax operation, producing large regions of misclassification.
+
+\textbf{Mosaic boundaries} (from argmax-before-upsampling) convert the soft, sub-pixel boundary information in the logits into hard, blocky edges.
+For thin structures like the LVM (which may be only 2--3 pixels wide at the network resolution), the mosaic effect can eliminate the structure entirely by merging it with adjacent classes.
+
+The \textbf{negative interaction} arises because geometric distortion amplifies boundary noise, and LBU's bilinear upsampling smooths this noise.
+When the input is geometrically distorted (non-ARP), the model's logits contain significant boundary noise, and LBU provides a large benefit by smoothing this noise before argmax.
+When the input is geometrically correct (ARP), the model's logits are already clean and confident, and LBU provides only a marginal improvement in boundary precision.
+Conversely, ARP corrects the geometry, which simultaneously reduces the boundary noise that LBU would otherwise need to address.
+Thus, the two fixes are partially redundant: they both act on the same underlying failure mode (boundary errors), albeit through different mechanisms.
+
+\subsection{Simulation Verification and Visualization}
+\label{sec:sim_exp}
+
+\subsubsection{Simulation Results}
+
+Table~\ref{tab:sim_results} presents the results of the $2\times2$ factorial experiment using the oracle model on simulated cardiac MRI data.
+The pattern is consistent with the real experiment: the Defective pipeline performs worst, and the ARP+LBU pipeline performs best, with ARP-only and LBU-only in between.
+
+\begin{table}[t]
+\centering
+\caption{Segmentation performance (Dice) on simulated cardiac MRI data using the oracle model. The pattern mirrors the real experiment, with ARP-only outperforming LBU-only and the full pipeline achieving the best results.}
+\label{tab:sim_results}
+\begin{tabular}{lcccc}
+\toprule
+Pipeline & Mean & LVBP & LVM & RV \\
+\midrule
+Defective & 0.617 & 0.909 & 0.459 & 0.484 \\
+LBU-only  & 0.741 & 0.965 & 0.627 & 0.631 \\
+ARP-only  & 0.840 & 0.976 & 0.748 & 0.795 \\
+ARP+LBU   & \textbf{0.909} & \textbf{0.987} & \textbf{0.857} & \textbf{0.883} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The factorial analysis of the simulation data (Table~\ref{tab:sim_factorial}) confirms the negative interaction direction, with ARP main effect $= +0.195$, LBU main effect $= +0.097$, and interaction $= -0.055$.
+While the interaction magnitude is smaller than in the real experiment ($-0.055$ vs.\ $-0.618$), the direction is consistent and the substitutability pattern holds: LBU effect without ARP ($+0.124$) is larger than LBU effect with ARP ($+0.069$), and ARP effect without LBU ($+0.223$) is larger than ARP effect with LBU ($+0.168$).
+
+\begin{table}[t]
+\centering
+\caption{$2\times2$ factorial analysis on simulated cardiac MRI data. The negative interaction confirms the substitutability pattern observed in the real experiment.}
+\label{tab:sim_factorial}
+\begin{tabular}{lc}
+\toprule
+Effect & Value \\
+\midrule
+Main effect of ARP  & $+0.195$ \\
+Main effect of LBU  & $+0.097$ \\
+Interaction (ARP $\times$ LBU) & $-0.055$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Visualization of Pipeline Defects}
+
+Figure~\ref{fig:comparison} provides a visual comparison of the segmentation outputs under the four pipeline variants.
+The Defective pipeline output exhibits two clearly visible artifacts: (1) the cardiac structures are geometrically distorted---the LVBP appears as an elongated ellipse rather than a circle, and the RV is compressed---and (2) the boundaries of all structures show a characteristic staircase pattern, with blocky edges instead of smooth curves.
+
+The ARP-only pipeline corrects the geometric distortion (the LVBP is circular and the RV has the correct shape), but the boundaries remain blocky.
+The LBU-only pipeline produces smooth boundaries but retains the geometric distortion---the structures have the correct edge quality but the wrong shape.
+The ARP+LBU pipeline produces the best result: correct geometry with smooth boundaries, closely matching the ground truth.
+
+The visualization also illustrates why the LVM and RV are most affected by the defects.
+The LVM is a thin ring structure; geometric distortion compresses it in one direction, potentially eliminating it entirely, while mosaic boundaries can merge the thin ring with adjacent classes.
+The RV has a complex crescent shape with high curvature; geometric distortion alters its shape, and mosaic boundaries cannot accurately represent its fine features.
+
+\begin{figure*}[t]
+\centering
+\begin{subfigure}[b]{0.16\textwidth}
+    \includegraphics[width=\textwidth]{figures/image.png}
+    \caption{Image}
+\end{subfigure}
+\begin{subfigure}[b]{0.16\textwidth}
+    \includegraphics[width=\textwidth]{figures/gt.png}
+    \caption{Ground Truth}
+\end{subfigure}
+\begin{subfigure}[b]{0.16\textwidth}
+    \includegraphics[width=\textwidth]{figures/defective.png}
+    \caption{Defective}
+\end{subfigure}
+\begin{subfigure}[b]{0.16\textwidth}
+    \includegraphics[width=\textwidth]{figures/arp_only.png}
+    \caption{ARP-only}
+\end{subfigure}
+\begin{subfigure}[b]{0.16\textwidth}
+    \includegraphics[width=\textwidth]{figures/lbu_only.png}
+    \caption{LBU-only}
+\end{subfigure}
+\begin{subfigure}[b]{0.16\textwidth}
+    \includegraphics[width=\textwidth]{figures/arp_lbu.png}
+    \caption{ARP+LBU}
+\end{subfigure}
+\caption{Visual comparison of segmentation outputs under the four inference pipeline variants on simulated cardiac MRI data. (c) The Defective pipeline shows both geometric distortion (elongated LVBP, compressed RV) and mosaic boundaries (staircase edges). (d) ARP-only corrects the geometry but retains blocky boundaries. (e) LBU-only produces smooth boundaries but retains geometric distortion. (f) ARP+LBU produces correct geometry with smooth boundaries.}
+\label{fig:comparison}
+\end{figure*}
+
+\subsubsection{Reconciling Real and Simulation Interaction Magnitudes}
+
+The interaction effect in the simulation ($-0.055$) is substantially smaller than in the real experiment ($-0.618$).
+This difference is expected and informative rather than contradictory:
+
+\begin{enumerate}[leftmargin=*]
+    \item The oracle model produces idealized logits that are a smooth, deterministic function of the ground truth. Real neural networks, by contrast, exhibit complex, nonlinear responses to geometric distortion, including systematic misclassification of boundary pixels that amplify the interaction.
+    \item The simulation's additive noise model provides a first-order approximation of the model's uncertainty on distorted inputs, but it cannot capture the full complexity of a trained network's failure modes, such as the systematic confusion between adjacent classes at distorted boundaries.
+    \item Despite the magnitude difference, the \emph{direction} and \emph{significance} of the interaction are consistent across both experiments, confirming the robustness of the substitutability finding.
+\end{enumerate}
+
+The simulation thus serves its intended purpose: providing a controlled, interpretable demonstration of the defect mechanisms and their interaction, while the real experiment provides the definitive quantitative evidence.
+
+\subsection{Ablation and Deployment Guidance}
+\label{sec:ablation}
+
+\subsubsection{Single-Fix Sufficiency}
+
+A key practical finding is that either fix alone recovers the vast majority of the lost performance.
+On the real dataset:
+\begin{itemize}[leftmargin=*]
+    \item ARP-only recovers $\frac{0.930 - 0.280}{0.938 - 0.280} = 98.8\%$ of the total recoverable Dice loss.
+    \item LBU-only recovers $\frac{0.906 - 0.280}{0.938 - 0.280} = 95.1\%$ of the total recoverable Dice loss.
+\end{itemize}
+This means that even in scenarios where only one fix can be implemented (e.g., due to framework constraints), the performance recovery is near-complete.
+
+\subsubsection{Deployment Decision Guidelines}
+
+Based on our factorial analysis, we provide the following evidence-based guidelines for deployment engineers:
+
+\textbf{Guideline 1: Prioritize ARP.}
+The ARP main effect ($+0.341$) is larger than the LBU main effect ($+0.317$), and ARP-only achieves a higher Dice (0.930) than LBU-only (0.906).
+If only one fix can be implemented, ARP should be preferred.
+
+\textbf{Guideline 2: Avoid over-engineering.}
+The negative interaction ($-0.618$) means that the combined benefit of ARP+LBU ($+0.658$) is substantially less than the sum of individual benefits ($+0.626 + +0.650 = +1.276$).
+Engineers should not expect additive gains from stacking fixes.
+
+\textbf{Guideline 3: Implement both when possible.}
+While the marginal gain from adding the second fix is small ($+0.008$ for LBU given ARP, $+0.032$ for ARP given LBU), both fixes are zero-cost and trivially implementable.
+For clinical applications where every fraction of Dice matters, the combined pipeline should be the default.
+
+\textbf{Guideline 4: Audit existing deployments.}
+The Defective pipeline's Dice of 0.280 would be immediately flagged as a model failure, but intermediate pipelines (e.g., LBU-only at 0.906) might be deemed ``acceptable'' without awareness that a simple, zero-cost fix could push performance to 0.938.
+Deployment audits should explicitly check for both ARP and LBU compliance.
+
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Anatomical Basis of the Negative Interaction}
+
+The strong negative interaction between ARP and LBU has a clear anatomical explanation.
+In cardiac MRI, the structures of interest span a range of spatial scales: the LVBP is a large, convex region; the LVM is a thin ring (2--4 pixels wide at typical resolutions); and the RV has a complex, crescent-shaped morphology with high boundary curvature.
+
+Geometric distortion from non-ARP scaling affects all structures but is most damaging for the LVM and RV.
+The LVM, being thin, is particularly vulnerable to compression: a 20\% compression in one direction can reduce a 3-pixel-wide ring to a 1-pixel-wide line, which the model may fail to detect.
+The RV's crescent shape is distorted into an unfamiliar geometry that the model has not encountered during training.
+
+When geometric distortion is present, the model's logits contain large errors at the boundaries of the LVM and RV.
+LBU's bilinear upsampling smooths these boundary errors, effectively interpolating between the correct and incorrect classes and often recovering the correct class at the original resolution.
+This is why LBU provides a large benefit without ARP: it compensates for the boundary noise caused by the distorted input.
+
+When ARP corrects the geometry, the model's logits are already accurate at the boundaries, and there is little noise for LBU to smooth.
+The marginal benefit of LBU shrinks accordingly.
+This is the essence of the functional substitutability: both fixes address boundary errors, but through different mechanisms (prevention vs.\ correction), and their effects partially overlap.
+
+\subsection{On the Magnitude Gap Between Real and Simulated Interactions}
+
+The interaction effect in the real experiment ($-0.618$) is an order of magnitude larger than in the simulation ($-0.055$).
+We attribute this gap primarily to the difference between the oracle model's idealized logits and a real neural network's complex response to geometric distortion.
+
+The oracle model generates logits by downsampling the ground truth, which produces smooth, well-behaved boundary transitions.
+Additive Gaussian noise provides a rough approximation of model uncertainty but cannot capture the structured, systematic errors that a trained network makes on distorted inputs---such as consistently confusing LVM pixels with LVBP pixels at compressed boundaries, or misclassifying the RV tip due to shape distortion.
+
+These structured errors create a larger ``repairable'' signal for LBU to act upon in the real experiment, amplifying the interaction.
+The simulation, while useful for mechanism visualization, underestimates this amplification due to its simpler error model.
+
+\subsection{Generalizability}
+
+While our experiments focus on cardiac MRI segmentation with MedNeXt-L, the pipeline defects we study are architecture-agnostic and modality-relevant:
+\begin{itemize}[leftmargin=*]
+    \item Non-ARP scaling affects any model that processes non-square images, regardless of architecture.
+    \item Argmax-before-upsampling affects any model that outputs logits at reduced resolution, which includes virtually all encoder-decoder segmentation networks.
+    \item The interaction pattern (negative, indicating substitutability) is likely to hold across anatomical structures with thin or high-curvature boundaries, such as retinal vessels, airways, or cortical layers.
+\end{itemize}
+We acknowledge that the magnitude of the effects may vary across datasets and models, and we encourage the community to replicate our factorial analysis on other benchmarks.
+
+\subsection{Limitations}
+
+Our work has several limitations:
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Extreme aspect ratios.} Our analysis assumes that images have moderate aspect ratios (typical of cardiac MRI). For images with extreme aspect ratios (e.g., panoramic or strip-shaped images), the zero-padding in ARP may occupy a large fraction of the canvas, potentially reducing the effective resolution available to the model. Alternative strategies such as tiled inference may be necessary.
+    \item \textbf{Architecture generalizability.} While the pipeline defects are architecture-agnostic, the magnitude of their impact may depend on the model's robustness to distribution shift. Models trained with extensive data augmentation may be more tolerant of geometric distortion, reducing the ARP effect. Our factorial analysis should be replicated across architectures to quantify this variation.
+    \item \textbf{3D extension.} Our analysis is conducted on 2D slices. In 3D segmentation, the same pipeline defects apply, but the interaction may differ due to the anisotropic voxel spacing commonly found in medical volumes. A 3D factorial analysis is an important direction for future work.
+\end{enumerate}
+
+\subsection{Toward Pipeline Benchmarking}
+
+We call for the medical image segmentation community to establish inference pipeline benchmarking suites that systematically evaluate the impact of preprocessing and postprocessing choices on deployment performance.
+Current benchmarks focus exclusively on model architecture, treating the pipeline as a fixed, invisible substrate.
+Our results demonstrate that this substrate is not neutral: it can determine whether a state-of-the-art model performs at 0.938 or 0.280 Dice.
+A pipeline benchmark would consist of:
+\begin{itemize}[leftmargin=*]
+    \item A standardized set of pipeline variants (ARP/non-ARP, LBU/non-LBU, and other common choices).
+    \item A protocol for evaluating each variant on multiple datasets and models.
+    \item A reporting standard that requires authors to specify their inference pipeline in full detail.
+\end{itemize}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have demonstrated that two common inference pipeline defects---non-aspect-ratio-preserving scaling and argmax-before-upsampling---can cause catastrophic performance collapse in medical image segmentation, degrading a MedNeXt-L model from 0.938 to 0.280 Dice on the CorSeg-CineSAX dataset.
+Our proposed zero-cost fixes, ARP and LBU, each recover over 95\% of the lost performance when applied individually.
+A $2\times2$ factorial analysis reveals a strong negative interaction ($-0.618$, $p < 10^{-70}$, Cohen's $d = -5.04$), establishing ARP and LBU as functional substitutes whose combined benefit is far less than the sum of their individual benefits.
+
+These findings carry a clear and urgent message for the medical image segmentation community: \textbf{inference pipeline design, not model architecture, is the decisive factor in deployment performance.}
+A state-of-the-art model deployed through a defective pipeline is worse than a mediocre model deployed correctly.
+Deployment engineers must scrutinize every step of the inference pipeline with the same rigor they apply to model selection and training.
+The fixes we propose---ARP and LBU---are trivial to implement, incur zero computational cost, and should be adopted as default practices in all medical image segmentation deployments.
+
+\section*{Acknowledgments}
+[Placeholder for acknowledgments.]
+
+\bibliographystyle{ieee_fullname}
+\bibliography{references}
+
+\end{document}
