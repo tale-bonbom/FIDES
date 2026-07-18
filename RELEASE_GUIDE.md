@@ -106,22 +106,22 @@ automatically trigger Zenodo to archive the repository** and assign a DOI.
 2. Check your email for a Zenodo confirmation
 3. Go to https://zenodo.org/account/settings/github/
 4. You should see a new deposit for `FIDES v1.0.0`
-5. The DOI will be in the format `10.5281/zenodo.XXXXXXX`
+5. The DOI will be in the format `10.5281/zenodo.21421492`
 
 ---
 
 ## Step 6: Replace DOI Placeholder
 
 Once you have the Zenodo DOI, you must replace the placeholder
-`10.5281/zenodo.XXXXXXX` in the following files:
+`10.5281/zenodo.21421492` in the following files:
 
 | File | Location | Replace |
 |------|----------|---------|
-| `README.md` | DOI badge (line 8) | `10.5281/zenodo.XXXXXXX` → your DOI |
-| `README.md` | BibTeX block | `10.5281/zenodo.XXXXXXX` → your DOI |
-| `README.md` | BSPC reference format | `10.5281/zenodo.XXXXXXX` → your DOI |
-| `FIDES_BSPC_Submission.md` | Line 247 (Data Availability) | `10.5281/zenodo.XXXXXXX` → your DOI |
-| `FIDES_BSPC_Submission.md` | Line 367 (Section S4) | `10.5281/zenodo.XXXXXXX` → your DOI |
+| `README.md` | DOI badge (line 8) | `10.5281/zenodo.21421492` → your DOI |
+| `README.md` | BibTeX block | `10.5281/zenodo.21421492` → your DOI |
+| `README.md` | BSPC reference format | `10.5281/zenodo.21421492` → your DOI |
+| `FIDES_BSPC_Submission.md` | Line 247 (Data Availability) | `10.5281/zenodo.21421492` → your DOI |
+| `FIDES_BSPC_Submission.md` | Line 367 (Section S4) | `10.5281/zenodo.21421492` → your DOI |
 
 **Automated replacement script**:
 
@@ -130,7 +130,7 @@ Once you have the Zenodo DOI, you must replace the placeholder
 import os
 
 YOUR_DOI = "10.5281/zenodo.1234567"  # REPLACE with your actual DOI
-PLACEHOLDER = "10.5281/zenodo.XXXXXXX"
+PLACEHOLDER = "10.5281/zenodo.21421492"
 
 files_to_update = [
     "README.md",
@@ -178,7 +178,7 @@ versioned DOI that conceptually links to the original v1.0.0 DOI.
 After completing all steps, verify:
 
 - [ ] GitHub Release v1.0.0 exists at https://github.com/tale-bonbom/FIDES/releases/tag/v1.0.0
-- [ ] Zenodo deposit exists with a DOI of format `10.5281/zenodo.XXXXXXX`
+- [ ] Zenodo deposit exists with a DOI of format `10.5281/zenodo.21421492`
 - [ ] `README.md` has the DOI badge with the actual DOI
 - [ ] `README.md` BibTeX block has the actual DOI in the `doi` field
 - [ ] `FIDES_BSPC_Submission.md` Data Availability Statement contains the actual DOI

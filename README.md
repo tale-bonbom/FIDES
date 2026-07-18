@@ -4,7 +4,7 @@
 [![Python: 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch: 2.0+](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg)](https://pytorch.org/)
 [![Version: 1.0.0](https://img.shields.io/badge/version-1.0.0-green.svg)](https://github.com/tale-bonbom/FIDES/releases/tag/v1.0.0)
-[![DOI: Zenodo](https://img.shields.io/badge/DOI-10.5281/zenodo.XXXXXXX-blue.svg)](https://doi.org/10.5281/zenodo.XXXXXXX)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21421492.svg)](https://doi.org/10.5281/zenodo.21421492)
 
 **Version 1.0.0** | [Changelog](CHANGELOG.md) | [Release v1.0.0](https://github.com/tale-bonbom/FIDES/releases/tag/v1.0.0)
 
@@ -363,14 +363,14 @@ If you use this code, please cite:
   version      = {1.0.0},
   year         = {2026},
   url          = {https://github.com/tale-bonbom/FIDES},
-  doi          = {10.5281/zenodo.XXXXXXX},
+  doi          = {10.5281/zenodo.21421492},
   license      = {MIT}
 }
 ```
 
 **BSPC Journal Reference Format** (for paper bibliography):
 
-> Bao H. FIDES: Fidelity-Informed Deployment for Exact Segmentation [Software]. Version 1.0.0. GitHub: https://github.com/tale-bonbom/FIDES. Archived at Zenodo: https://doi.org/10.5281/zenodo.XXXXXXX (2026).
+> Bao H. FIDES: Fidelity-Informed Deployment for Exact Segmentation [Software]. Version 1.0.0. GitHub: https://github.com/tale-bonbom/FIDES. Archived at Zenodo: https://doi.org/10.5281/zenodo.21421492 (2026).
 
 ## License
 
